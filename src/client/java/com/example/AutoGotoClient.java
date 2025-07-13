@@ -20,6 +20,15 @@ import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.io.*;
+import java.nio.file.*;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.reflect.TypeToken;
 
 public class AutoGotoClient implements ClientModInitializer {
     private final List<BlockPos> coordinates = new ArrayList<>();
@@ -45,6 +54,14 @@ public class AutoGotoClient implements ClientModInitializer {
     private int homeDelayTicks = 0;
     private final int HOME_DELAY_SECONDS = 3; // 3 giây cố định
     
+    // File system
+    private static final String CONFIG_DIR = "config/autogoto";
+    private static final String WAYPOINTS_DIR = CONFIG_DIR + "/waypoints";
+    private static final String SETTINGS_FILE = CONFIG_DIR + "/settings.json";
+    private static final String CURRENT_WAYPOINTS_FILE = CONFIG_DIR + "/current.json";
+    
+    private final Gson gson = new GsonBuilder().setPrettyPrinting().create();
+    
     @Override
     public void onInitializeClient() {
         // Tạo key binding
@@ -54,6 +71,13 @@ public class AutoGotoClient implements ClientModInitializer {
             GLFW.GLFW_KEY_G,
             "category.autogoto"
         ));
+        
+        // Tạo thư mục config
+        createConfigDirectories();
+        
+        // Load settings và waypoints
+        loadSettings();
+        loadCurrentWaypoints();
         
         // Đăng ký các commands
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
@@ -86,15 +110,448 @@ public class AutoGotoClient implements ClientModInitializer {
                     .executes(this::showDelayCommand))
                 .then(ClientCommandManager.literal("settings")
                     .executes(this::showSettingsCommand))
+                // FILE MANAGEMENT COMMANDS
+                .then(ClientCommandManager.literal("save")
+                    .then(ClientCommandManager.argument("filename", StringArgumentType.word())
+                        .executes(this::saveWaypointsCommand))
+                    .executes(this::saveWaypointsWithDateCommand))
+                .then(ClientCommandManager.literal("load")
+                    .then(ClientCommandManager.argument("filename", StringArgumentType.word())
+                        .executes(this::loadWaypointsCommand)))
+                .then(ClientCommandManager.literal("delete")
+                    .then(ClientCommandManager.argument("filename", StringArgumentType.word())
+                        .executes(this::deleteWaypointsCommand)))
+                .then(ClientCommandManager.literal("files")
+                    .executes(this::listFilesCommand))
+                .then(ClientCommandManager.literal("export")
+                    .then(ClientCommandManager.argument("filename", StringArgumentType.word())
+                        .executes(this::exportWaypointsCommand)))
+                .then(ClientCommandManager.literal("import")
+                    .then(ClientCommandManager.argument("filename", StringArgumentType.word())
+                        .executes(this::importWaypointsCommand)))
                 .executes(this::showHelpCommand));
         });
         
         // Đăng ký client tick event
         ClientTickEvents.END_CLIENT_TICK.register(this::onClientTick);
         
-        System.out.println("AutoGoto loaded with loop mode!");
+        System.out.println("AutoGoto loaded with file system!");
     }
     
+    // FILE SYSTEM METHODS
+    private void createConfigDirectories() {
+        try {
+            Files.createDirectories(Paths.get(CONFIG_DIR));
+            Files.createDirectories(Paths.get(WAYPOINTS_DIR));
+            System.out.println("AutoGoto: Created config directories");
+        } catch (IOException e) {
+            System.err.println("AutoGoto: Failed to create config directories: " + e.getMessage());
+        }
+    }
+    
+    private void saveSettings() {
+        try {
+            Map<String, Object> settings = new HashMap<>();
+            settings.put("isLoopMode", isLoopMode);
+            settings.put("loopDelaySeconds", loopDelaySeconds);
+            settings.put("customMessage", customMessage);
+            
+            String json = gson.toJson(settings);
+            Files.write(Paths.get(SETTINGS_FILE), json.getBytes());
+        } catch (IOException e) {
+            System.err.println("AutoGoto: Failed to save settings: " + e.getMessage());
+        }
+    }
+    
+private void loadSettings() {
+    try {
+        if (Files.exists(Paths.get(SETTINGS_FILE))) {
+            String json = new String(Files.readAllBytes(Paths.get(SETTINGS_FILE)));
+            Map<String, Object> settings = gson.fromJson(json, new TypeToken<Map<String, Object>>(){}.getType());
+            
+            if (settings != null) {
+                // Safe parsing với null check
+                Object loopModeObj = settings.get("isLoopMode");
+                if (loopModeObj != null) {
+                    isLoopMode = (Boolean) loopModeObj;
+                }
+                
+                Object delayObj = settings.get("loopDelaySeconds");
+                if (delayObj != null) {
+                    loopDelaySeconds = ((Number) delayObj).intValue();
+                }
+                
+                Object messageObj = settings.get("customMessage");
+                if (messageObj != null) {
+                    customMessage = (String) messageObj;
+                }
+            }
+            System.out.println("AutoGoto: Loaded settings");
+        }
+    } catch (Exception e) {
+        System.err.println("AutoGoto: Failed to load settings: " + e.getMessage());
+        e.printStackTrace();
+    }
+}
+    
+private void saveCurrentWaypoints() {
+    try {
+        // Convert BlockPos to simple coordinate objects
+        List<Map<String, Integer>> coordList = new ArrayList<>();
+        for (BlockPos pos : coordinates) {
+            Map<String, Integer> coord = new HashMap<>();
+            coord.put("x", pos.getX());
+            coord.put("y", pos.getY());
+            coord.put("z", pos.getZ());
+            coordList.add(coord);
+        }
+        
+        Map<String, Object> data = new HashMap<>();
+        data.put("coordinates", coordList);
+        data.put("currentIndex", currentIndex);
+        data.put("savedAt", LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
+        
+        String json = gson.toJson(data);
+        Files.write(Paths.get(CURRENT_WAYPOINTS_FILE), json.getBytes());
+    } catch (IOException e) {
+        System.err.println("AutoGoto: Failed to save current waypoints: " + e.getMessage());
+    }
+}
+    
+private void loadCurrentWaypoints() {
+    try {
+        if (Files.exists(Paths.get(CURRENT_WAYPOINTS_FILE))) {
+            String json = new String(Files.readAllBytes(Paths.get(CURRENT_WAYPOINTS_FILE)));
+            Map<String, Object> data = gson.fromJson(json, new TypeToken<Map<String, Object>>(){}.getType());
+            
+            if (data != null && data.containsKey("coordinates")) {
+                coordinates.clear();
+                List<Map<String, Object>> coords = (List<Map<String, Object>>) data.get("coordinates");
+                
+                if (coords != null) {
+                    for (Map<String, Object> coord : coords) {
+                        if (coord != null) {
+                            // Safe parsing với null check
+                            Object xObj = coord.get("x");
+                            Object yObj = coord.get("y");
+                            Object zObj = coord.get("z");
+                            
+                            if (xObj != null && yObj != null && zObj != null) {
+                                int x = ((Number) xObj).intValue();
+                                int y = ((Number) yObj).intValue();
+                                int z = ((Number) zObj).intValue();
+                                coordinates.add(new BlockPos(x, y, z));
+                            }
+                        }
+                    }
+                }
+                
+                // Safe parsing currentIndex
+                Object indexObj = data.get("currentIndex");
+                if (indexObj != null) {
+                    currentIndex = ((Number) indexObj).intValue();
+                } else {
+                    currentIndex = 0;
+                }
+                
+                System.out.println("AutoGoto: Loaded " + coordinates.size() + " waypoints");
+            }
+        }
+    } catch (Exception e) {
+        System.err.println("AutoGoto: Failed to load current waypoints: " + e.getMessage());
+        e.printStackTrace();
+    }
+}
+    
+private void saveWaypointsToFile(String filename) {
+    try {
+        // Convert BlockPos to simple coordinate objects
+        List<Map<String, Integer>> coordList = new ArrayList<>();
+        for (BlockPos pos : coordinates) {
+            Map<String, Integer> coord = new HashMap<>();
+            coord.put("x", pos.getX());
+            coord.put("y", pos.getY());
+            coord.put("z", pos.getZ());
+            coordList.add(coord);
+        }
+        
+        Map<String, Object> data = new HashMap<>();
+        data.put("name", filename);
+        data.put("coordinates", coordList);
+        data.put("createdAt", LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
+        data.put("count", coordinates.size());
+        data.put("settings", Map.of(
+            "isLoopMode", isLoopMode,
+            "loopDelaySeconds", loopDelaySeconds,
+            "customMessage", customMessage
+        ));
+        
+        String json = gson.toJson(data);
+        String filepath = WAYPOINTS_DIR + "/" + filename + ".json";
+        Files.write(Paths.get(filepath), json.getBytes());
+        System.out.println("AutoGoto: Saved " + coordinates.size() + " waypoints to " + filename + ".json");
+    } catch (IOException e) {
+        System.err.println("AutoGoto: Failed to save waypoints to file: " + e.getMessage());
+    }
+}
+    
+private boolean loadWaypointsFromFile(String filename) {
+    try {
+        String filepath = WAYPOINTS_DIR + "/" + filename + ".json";
+        if (!Files.exists(Paths.get(filepath))) {
+            return false;
+        }
+        
+        String json = new String(Files.readAllBytes(Paths.get(filepath)));
+        Map<String, Object> data = gson.fromJson(json, new TypeToken<Map<String, Object>>(){}.getType());
+        
+        if (data != null && data.containsKey("coordinates")) {
+            coordinates.clear();
+            List<Map<String, Object>> coords = (List<Map<String, Object>>) data.get("coordinates");
+            
+            if (coords != null) {
+                for (Map<String, Object> coord : coords) {
+                    if (coord != null) {
+                        // Try both formats: standard (x,y,z) and Minecraft field names
+                        Object xObj = coord.get("x");
+                        Object yObj = coord.get("y");
+                        Object zObj = coord.get("z");
+                        
+                        // If standard format doesn't work, try Minecraft field names
+                        if (xObj == null || yObj == null || zObj == null) {
+                            xObj = coord.get("field_11175"); // x
+                            yObj = coord.get("field_11174"); // y
+                            zObj = coord.get("field_11173"); // z
+                        }
+                        
+                        if (xObj != null && yObj != null && zObj != null) {
+                            int x = ((Number) xObj).intValue();
+                            int y = ((Number) yObj).intValue();
+                            int z = ((Number) zObj).intValue();
+                            coordinates.add(new BlockPos(x, y, z));
+                            System.out.println("AutoGoto: Loaded coordinate: " + x + ", " + y + ", " + z);
+                        } else {
+                            System.out.println("AutoGoto: Failed to parse coordinate: " + coord);
+                        }
+                    }
+                }
+            }
+            
+            System.out.println("AutoGoto: Total coordinates loaded: " + coordinates.size());
+            
+            // Load settings if available với null check
+            if (data.containsKey("settings")) {
+                Map<String, Object> settings = (Map<String, Object>) data.get("settings");
+                if (settings != null) {
+                    // Safe parsing settings
+                    Object loopModeObj = settings.get("isLoopMode");
+                    if (loopModeObj != null) {
+                        isLoopMode = (Boolean) loopModeObj;
+                    }
+                    
+                    Object delayObj = settings.get("loopDelaySeconds");
+                    if (delayObj != null) {
+                        loopDelaySeconds = ((Number) delayObj).intValue();
+                    }
+                    
+                    Object messageObj = settings.get("customMessage");
+                    if (messageObj != null) {
+                        customMessage = (String) messageObj;
+                    }
+                }
+            }
+            
+            currentIndex = 0;
+            saveCurrentWaypoints();
+            saveSettings();
+            return true;
+        }
+    } catch (Exception e) {
+        System.err.println("AutoGoto: Failed to load waypoints from file: " + e.getMessage());
+        e.printStackTrace();
+    }
+    return false;
+}
+    
+    // COMMAND HANDLERS FOR FILE SYSTEM
+    private int saveWaypointsCommand(CommandContext<FabricClientCommandSource> context) {
+        ClientPlayerEntity player = context.getSource().getPlayer();
+        String filename = StringArgumentType.getString(context, "filename");
+        
+        if (coordinates.isEmpty()) {
+            player.sendMessage(Text.literal("§c[AutoGoto] Không có waypoints để lưu!"), false);
+            return 1;
+        }
+        
+        saveWaypointsToFile(filename);
+        player.sendMessage(Text.literal("§a[AutoGoto] Đã lưu " + coordinates.size() + " waypoints vào file: " + filename + ".json"), false);
+        return 1;
+    }
+    
+    private int saveWaypointsWithDateCommand(CommandContext<FabricClientCommandSource> context) {
+        ClientPlayerEntity player = context.getSource().getPlayer();
+        
+        if (coordinates.isEmpty()) {
+            player.sendMessage(Text.literal("§c[AutoGoto] Không có waypoints để lưu!"), false);
+            return 1;
+        }
+        
+        String filename = "waypoints_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
+        saveWaypointsToFile(filename);
+        player.sendMessage(Text.literal("§a[AutoGoto] Đã lưu " + coordinates.size() + " waypoints vào file: " + filename + ".json"), false);
+        return 1;
+    }
+    
+    private int loadWaypointsCommand(CommandContext<FabricClientCommandSource> context) {
+        ClientPlayerEntity player = context.getSource().getPlayer();
+        String filename = StringArgumentType.getString(context, "filename");
+        
+        if (loadWaypointsFromFile(filename)) {
+            player.sendMessage(Text.literal("§a[AutoGoto] Đã load " + coordinates.size() + " waypoints từ file: " + filename + ".json"), false);
+        } else {
+            player.sendMessage(Text.literal("§c[AutoGoto] Không tìm thấy file: " + filename + ".json"), false);
+        }
+        return 1;
+    }
+    
+    private int deleteWaypointsCommand(CommandContext<FabricClientCommandSource> context) {
+        ClientPlayerEntity player = context.getSource().getPlayer();
+        String filename = StringArgumentType.getString(context, "filename");
+        
+        try {
+            String filepath = WAYPOINTS_DIR + "/" + filename + ".json";
+            if (Files.exists(Paths.get(filepath))) {
+                Files.delete(Paths.get(filepath));
+                player.sendMessage(Text.literal("§a[AutoGoto] Đã xóa file: " + filename + ".json"), false);
+            } else {
+                player.sendMessage(Text.literal("§c[AutoGoto] Không tìm thấy file: " + filename + ".json"), false);
+            }
+        } catch (IOException e) {
+            player.sendMessage(Text.literal("§c[AutoGoto] Lỗi khi xóa file: " + e.getMessage()), false);
+        }
+        return 1;
+    }
+    
+    private int listFilesCommand(CommandContext<FabricClientCommandSource> context) {
+        ClientPlayerEntity player = context.getSource().getPlayer();
+        
+        try {
+            if (!Files.exists(Paths.get(WAYPOINTS_DIR))) {
+                player.sendMessage(Text.literal("§e[AutoGoto] Chưa có file waypoints nào!"), false);
+                return 1;
+            }
+            
+            List<String> files = Files.list(Paths.get(WAYPOINTS_DIR))
+                .filter(path -> path.toString().endsWith(".json"))
+                .map(path -> path.getFileName().toString().replace(".json", ""))
+                .sorted()
+                .toList();
+            
+            if (files.isEmpty()) {
+                player.sendMessage(Text.literal("§e[AutoGoto] Chưa có file waypoints nào!"), false);
+            } else {
+                player.sendMessage(Text.literal("§e[AutoGoto] Danh sách file waypoints (" + files.size() + "):"), false);
+                for (String file : files) {
+                    // Load file info
+                    try {
+                        String filepath = WAYPOINTS_DIR + "/" + file + ".json";
+                        String json = new String(Files.readAllBytes(Paths.get(filepath)));
+                        Map<String, Object> data = gson.fromJson(json, new TypeToken<Map<String, Object>>(){}.getType());
+                        
+                        int count = ((Double) data.getOrDefault("count", 0.0)).intValue();
+                        String createdAt = (String) data.getOrDefault("createdAt", "Unknown");
+                        
+                        player.sendMessage(Text.literal("§7  " + file + " §f(" + count + " waypoints, " + createdAt + ")"), false);
+                    } catch (Exception e) {
+                        player.sendMessage(Text.literal("§7  " + file + " §c(lỗi đọc file)"), false);
+                    }
+                }
+            }
+        } catch (IOException e) {
+            player.sendMessage(Text.literal("§c[AutoGoto] Lỗi khi đọc thư mục: " + e.getMessage()), false);
+        }
+        return 1;
+    }
+    
+    private int exportWaypointsCommand(CommandContext<FabricClientCommandSource> context) {
+        ClientPlayerEntity player = context.getSource().getPlayer();
+        String filename = StringArgumentType.getString(context, "filename");
+        
+        if (coordinates.isEmpty()) {
+            player.sendMessage(Text.literal("§c[AutoGoto] Không có waypoints để export!"), false);
+            return 1;
+        }
+        
+        try {
+            // Export as shareable format
+            StringBuilder sb = new StringBuilder();
+            sb.append("# AutoGoto Waypoints Export\n");
+            sb.append("# Created: ").append(LocalDateTime.now().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)).append("\n");
+            sb.append("# Count: ").append(coordinates.size()).append("\n");
+            sb.append("# Settings: Loop=").append(isLoopMode).append(", Delay=").append(loopDelaySeconds).append("s, Message=").append(customMessage).append("\n");
+            sb.append("#\n");
+            
+            for (int i = 0; i < coordinates.size(); i++) {
+                BlockPos pos = coordinates.get(i);
+                sb.append(pos.getX()).append(",").append(pos.getY()).append(",").append(pos.getZ()).append("\n");
+            }
+            
+            String filepath = CONFIG_DIR + "/" + filename + ".txt";
+            Files.write(Paths.get(filepath), sb.toString().getBytes());
+            
+            player.sendMessage(Text.literal("§a[AutoGoto] Đã export " + coordinates.size() + " waypoints ra file: " + filename + ".txt"), false);
+            player.sendMessage(Text.literal("§7[AutoGoto] File có thể chia sẻ tại: " + filepath), false);
+        } catch (IOException e) {
+            player.sendMessage(Text.literal("§c[AutoGoto] Lỗi khi export: " + e.getMessage()), false);
+        }
+        return 1;
+    }
+    
+    private int importWaypointsCommand(CommandContext<FabricClientCommandSource> context) {
+        ClientPlayerEntity player = context.getSource().getPlayer();
+        String filename = StringArgumentType.getString(context, "filename");
+        
+        try {
+            String filepath = CONFIG_DIR + "/" + filename + ".txt";
+            if (!Files.exists(Paths.get(filepath))) {
+                player.sendMessage(Text.literal("§c[AutoGoto] Không tìm thấy file: " + filename + ".txt"), false);
+                return 1;
+            }
+            
+            List<String> lines = Files.readAllLines(Paths.get(filepath));
+            coordinates.clear();
+            
+            for (String line : lines) {
+                line = line.trim();
+                if (line.startsWith("#") || line.isEmpty()) continue;
+                
+                String[] parts = line.split(",");
+                if (parts.length == 3) {
+                    try {
+                        int x = Integer.parseInt(parts[0].trim());
+                        int y = Integer.parseInt(parts[1].trim());
+                        int z = Integer.parseInt(parts[2].trim());
+                        coordinates.add(new BlockPos(x, y, z));
+                    } catch (NumberFormatException e) {
+                        player.sendMessage(Text.literal("§c[AutoGoto] Dòng không hợp lệ: " + line), false);
+                    }
+                }
+            }
+            
+            if (coordinates.isEmpty()) {
+                player.sendMessage(Text.literal("§c[AutoGoto] Không tìm thấy waypoints hợp lệ trong file!"), false);
+            } else {
+                currentIndex = 0;
+                saveCurrentWaypoints();
+                player.sendMessage(Text.literal("§a[AutoGoto] Đã import " + coordinates.size() + " waypoints từ file: " + filename + ".txt"), false);
+            }
+        } catch (IOException e) {
+            player.sendMessage(Text.literal("§c[AutoGoto] Lỗi khi import: " + e.getMessage()), false);
+        }
+        return 1;
+    }
+    
+    // TICK EVENTS
     private void onClientTick(MinecraftClient client) {
         if (client.player == null) return;
         
@@ -118,39 +575,39 @@ public class AutoGotoClient implements ClientModInitializer {
     }
     
     private void handleHomeDelay(ClientPlayerEntity player) {
-    homeDelayTicks++;
-    
-    // Hiển thị countdown mỗi giây
-    if (homeDelayTicks % 20 == 0) {
-        int remainingSeconds = HOME_DELAY_SECONDS - (homeDelayTicks / 20);
-        if (remainingSeconds > 0) {
-            player.sendMessage(Text.literal("§e[AutoGoto] Send message sau: " + 
-                remainingSeconds + " giây..."), true);
+        homeDelayTicks++;
+        
+        // Hiển thị countdown mỗi giây
+        if (homeDelayTicks % 20 == 0) {
+            int remainingSeconds = HOME_DELAY_SECONDS - (homeDelayTicks / 20);
+            if (remainingSeconds > 0) {
+                player.sendMessage(Text.literal("§e[AutoGoto] Send message sau: " + 
+                    remainingSeconds + " giây..."), true);
+            }
+        }
+        
+        // Khi hết thời gian delay
+        if (homeDelayTicks >= HOME_DELAY_SECONDS * 20) {
+            homeDelayTicks = 0;
+            isWaitingForHome = false;
+            
+            // Send custom message
+            player.networkHandler.sendChatMessage(customMessage);
+            player.sendMessage(Text.literal("§a[AutoGoto] Đã gửi: " + customMessage), false);
+            
+            if (isLoopMode) {
+                // Chế độ vòng lặp - chờ delay rồi tiếp tục
+                isWaitingForNextLoop = true;
+                loopDelayTicks = 0;
+                currentIndex = 0;
+                player.sendMessage(Text.literal("§b[AutoGoto] Chờ " + loopDelaySeconds + " giây để bắt đầu vòng lặp tiếp theo..."), false);
+            } else {
+                // Chế độ chạy 1 lần - dừng
+                player.sendMessage(Text.literal("§a[AutoGoto] Hoàn thành! (Chế độ chạy 1 lần)"), false);
+                stopAutoGoto(player);
+            }
         }
     }
-    
-    // Khi hết thời gian delay
-    if (homeDelayTicks >= HOME_DELAY_SECONDS * 20) {
-        homeDelayTicks = 0;
-        isWaitingForHome = false;
-        
-        // Send custom message
-        player.networkHandler.sendChatMessage(customMessage);
-        player.sendMessage(Text.literal("§a[AutoGoto] Đã gửi: " + customMessage), false);
-        
-        if (isLoopMode) {
-            // Chế độ vòng lặp - chờ delay rồi tiếp tục
-            isWaitingForNextLoop = true;
-            loopDelayTicks = 0;
-            currentIndex = 0;
-            player.sendMessage(Text.literal("§b[AutoGoto] Chờ " + loopDelaySeconds + " giây để bắt đầu vòng lặp tiếp theo..."), false);
-        } else {
-            // Chế độ chạy 1 lần - dừng
-            player.sendMessage(Text.literal("§a[AutoGoto] Hoàn thành! (Chế độ chạy 1 lần)"), false);
-            stopAutoGoto(player);
-        }
-    }
-}
     
     private void handleLoopDelay(ClientPlayerEntity player) {
         loopDelayTicks++;
@@ -222,7 +679,7 @@ public class AutoGotoClient implements ClientModInitializer {
         }
     }
     
-    // Command handlers
+    // COMMAND HANDLERS
     private int startAutoGotoCommand(CommandContext<FabricClientCommandSource> context) {
         ClientPlayerEntity player = context.getSource().getPlayer();
         startAutoGoto(player);
@@ -238,6 +695,7 @@ public class AutoGotoClient implements ClientModInitializer {
     private int setOnceModeCommand(CommandContext<FabricClientCommandSource> context) {
         ClientPlayerEntity player = context.getSource().getPlayer();
         isLoopMode = false;
+        saveSettings();
         player.sendMessage(Text.literal("§a[AutoGoto] Đã đặt chế độ: Chạy 1 lần"), false);
         return 1;
     }
@@ -245,6 +703,7 @@ public class AutoGotoClient implements ClientModInitializer {
     private int setLoopModeCommand(CommandContext<FabricClientCommandSource> context) {
         ClientPlayerEntity player = context.getSource().getPlayer();
         isLoopMode = true;
+        saveSettings();
         player.sendMessage(Text.literal("§a[AutoGoto] Đã đặt chế độ: Vòng lặp"), false);
         return 1;
     }
@@ -260,6 +719,7 @@ public class AutoGotoClient implements ClientModInitializer {
         ClientPlayerEntity player = context.getSource().getPlayer();
         int seconds = IntegerArgumentType.getInteger(context, "seconds");
         loopDelaySeconds = seconds;
+        saveSettings();
         player.sendMessage(Text.literal("§a[AutoGoto] Đã đặt delay: " + seconds + " giây"), false);
         return 1;
     }
@@ -304,6 +764,7 @@ public class AutoGotoClient implements ClientModInitializer {
         ClientPlayerEntity player = context.getSource().getPlayer();
         String message = StringArgumentType.getString(context, "msg");
         customMessage = message;
+        saveSettings();
         player.sendMessage(Text.literal("§a[AutoGoto] Đã đặt custom message: §7" + message), false);
         return 1;
     }
@@ -320,7 +781,7 @@ public class AutoGotoClient implements ClientModInitializer {
         return 1;
     }
     
-    // Core methods
+    // CORE METHODS
     private void toggleAutoGoto(ClientPlayerEntity player) {
         if (isAutoGotoEnabled) {
             stopAutoGoto(player);
@@ -370,6 +831,9 @@ public class AutoGotoClient implements ClientModInitializer {
         BlockPos currentPos = player.getBlockPos();
         coordinates.add(currentPos);
         
+        // Auto-save after adding
+        saveCurrentWaypoints();
+        
         player.sendMessage(Text.literal("§a[AutoGoto] Đã thêm vị trí: " + 
             currentPos.getX() + ", " + currentPos.getY() + ", " + currentPos.getZ() + 
             " (Tổng: " + coordinates.size() + ")"), false);
@@ -383,6 +847,9 @@ public class AutoGotoClient implements ClientModInitializer {
         isWaitingForNextLoop = false;
         isWaitingForHome = false;
         completedLoops = 0;
+        
+        // Auto-save after clearing
+        saveCurrentWaypoints();
         
         player.sendMessage(Text.literal("§c[AutoGoto] Đã xóa " + count + " vị trí!"), false);
     }
@@ -433,5 +900,12 @@ public class AutoGotoClient implements ClientModInitializer {
         player.sendMessage(Text.literal("§7/autogoto delay <giây> §f- Đặt delay giữa các vòng lặp"), false);
         player.sendMessage(Text.literal("§7/autogoto message <msg> §f- Đặt custom message"), false);
         player.sendMessage(Text.literal("§7/autogoto settings §f- Xem tất cả cài đặt"), false);
+        player.sendMessage(Text.literal("§6=== FILE MANAGEMENT ==="), false);
+        player.sendMessage(Text.literal("§7/autogoto save [name] §f- Lưu waypoints"), false);
+        player.sendMessage(Text.literal("§7/autogoto load <name> §f- Load waypoints"), false);
+        player.sendMessage(Text.literal("§7/autogoto delete <name> §f- Xóa file waypoints"), false);
+        player.sendMessage(Text.literal("§7/autogoto files §f- Xem danh sách file"), false);
+        player.sendMessage(Text.literal("§7/autogoto export <name> §f- Export để chia sẻ"), false);
+        player.sendMessage(Text.literal("§7/autogoto import <name> §f- Import từ file chia sẻ"), false);
     }
 }
